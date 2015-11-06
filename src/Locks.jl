@@ -6,10 +6,10 @@ type Lock
 end
 function holding(f::Function, l::Lock, id)
     Base.acquire(l.sem)
-    print("$id HOLDING LOCK\n")
+    # print("$id HOLDING LOCK\n")
     f_ = f()
     Base.release(l.sem)
-    print("$id RELEASING LOCK\n")
+    # print("$id RELEASING LOCK\n")
     f_
 end
 function holding(f::Function, l::Lock)

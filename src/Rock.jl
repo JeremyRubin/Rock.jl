@@ -305,7 +305,7 @@ function RPCServer{Command, Snapshot}(px::Paxos{Command, Snapshot})
             try
                 while true
                     args = deserialize(conn)
-                    @show args
+                    # @show args
                     r = Handle(px, args)
                     serialize(conn,r)
                     try
@@ -363,29 +363,32 @@ end
 function Forgettor{Command, Snapshot}(px::Paxos{Command, Snapshot})
     while true
         completed = take!(px.forgetChan)
-        print("enter Forgettor\n")
-        @show px.completed
-        @show completed
+        # print("enter Forgettor\n")
+        # @show px.completed
+        # @show completed
         holding(px.lock, "Forgettor") do
             px.completed = max(px.completed, completed)
             px.forgot = min(px.completed...)
         end
-        @show px.completed
+        # @show px.completed
 
+        # Update the forgot index first because we want to prevent the
+        # case where we delete a file, then crash, and think our
+        # forgot index is too high
+        open(px.context.forget_f, "w") do io
+            serialize(io, px.forgot)
+        end
         for f=readdir(px.context.slot_dir)
             if parse(Int64, f) <= px.forgot
                 rm("$(px.context.slot_dir)/$f")
             end
         end
 
-        open(px.context.forget_f, "w") do io
-            serialize(io, px.forgot)
-        end
     end
 end
 
 function node{Command, Snapshot}(context::Context{Command, Snapshot}, self::Int64, snapshot::Snapshot)
-    print("Starting on $(context.port)\n")
+    # print("Starting on $(context.port)\n")
     
     mkpath(context.slot_dir)
     log = Dict{SlotNum, Slot{context.t}}()
@@ -399,14 +402,14 @@ function node{Command, Snapshot}(context::Context{Command, Snapshot}, self::Int6
     end
 
     if isfile(context.snapshot_f)
-        open(context.snapshot_f, "w+") do io
+        open(context.snapshot_f) do io
             snapshot = deserialize(io)
         end
     end
 
     slot_nums = fill(-1,length(context.peers))
     if isfile(context.slot_num_f)
-        open(context.slot_num_f, "w+") do io
+        open(context.slot_num_f) do io
             slot_nums[self] = deserialize(io)
         end
     end
@@ -414,7 +417,7 @@ function node{Command, Snapshot}(context::Context{Command, Snapshot}, self::Int6
     forget = -1
 
     if isfile(context.forget_f)
-        open(context.forget_f, "w") do io
+        open(context.forget_f) do io
             forget = deserialize(io)
         end
     end

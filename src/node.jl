@@ -49,7 +49,7 @@ peers = [("localhost", 8081), ("localhost", 8082), ("localhost", 8083) ]::Array{
 if port  > 8080
     KVStore.mk(port, peers)
 else
-    KVStore.put("localhost",8081, "a", "x")
+    KVStore.append("localhost",8081, "HELLO", "WORLD")
 end
 
 
