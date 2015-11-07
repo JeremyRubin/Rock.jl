@@ -1,5 +1,9 @@
 module Rock
 using Locks
+
+############################
+##    Base/Abstract types ##
+############################
 typealias ServerId Int64
 typealias  LogIndex Int64
 typealias Term Int64
@@ -7,108 +11,224 @@ typealias Prepare Int64
 typealias SlotNum Int
 typealias Hostname AbstractString
 typealias Port Int64
-@enum Fate Decided Pending Forgotten
 
-type ExtraInfo
-    completed::Array{Int64, 1}
-end
+# Our abstract notion of Paxos
+abstract Paxos
+
+
+# The following API must be supported!!
+# function port(px::Paxos)#::Int64
+#     throw(ErrorException("Please Implement"))
+# end
+# function peers(px::Paxos)#::Array{Tuple{Hostname, Port},1}
+#     throw(ErrorException("Please Implement"))
+# end
+# end
+# function transition(px::Paxos, v::ExternalCriticalCommand)#:: Function
+#     throw(ErrorException("Please Implement"))
+
+# end
+# function syncCompleted(px::Paxos)
+#     throw(ErrorException("Please Implement"))
+# end
+# function syncForgot(px::Paxos)
+#     throw(ErrorException("Please Implement"))
+# end
+# function syncSnapshot(px::Paxos)
+#     throw(ErrorException("Please Implement"))
+# end
+# function syncSlot(px::Paxos, s::Slot)
+#     throw(ErrorException("Please Implement"))
+# end
+# function self(px::Paxos)#::Int64
+#     throw(ErrorException("Please Implement"))
+# end
+# function log(px::Paxos)#::Log
+#     throw(ErrorException("Please Implement"))
+# end
+# function completed(px::Paxos)#::Array{Int64, 1}
+#     throw(ErrorException("Please Implement"))
+# end
+# function updateCompleted(px::Paxos, completed::Array{Int64, 1})
+#     throw(ErrorException("Please Implement"))
+# end
+# function forgot(px::Paxos)##::Int64
+#     throw(ErrorException("Please Implement"))
+# end
+# function context(px::Paxos)#::Context
+#     throw(ErrorException("Please Implement"))
+# end
+# function lock(px::Paxos)#::Lock
+#     throw(ErrorException("Please Implement"))
+# end
+# function forgetChan(px::Paxos)#::Channel{Array{Int64, 1}}
+#     throw(ErrorException("Please Implement"))
+# end
+
+# Base Message Type, not too useful
 abstract BaseMessage
+# Command type; cause some action to happen on a server
 abstract Command <: BaseMessage
+# Resonse as a result of causing a command to happen
 abstract Response <: BaseMessage
+# Commands that do not need replication
 abstract NonCriticalCommand <: Command
+# Critical commands need fault tolerance, not instance specific
+abstract CriticalCommand <: Command
+# Internal critical commands for actions such as membership changes
+abstract InternalCriticalCommand <: CriticalCommand
+# External critical commands for the user subclass
+abstract ExternalCriticalCommand <: CriticalCommand
+# Non Critical for consistency, but critical for progress/consensus forming messages.
 abstract ConsensusCommand <: Command
-abstract InternalConsensusCommand <: ConsensusCommand
-abstract ExternalConsensusCommand <: ConsensusCommand
-
-immutable Ping <: NonCriticalCommand
-end
-immutable PingReply <: Response
-end
-immutable SwapServer <: InternalConsensusCommand
-    old::Tuple{Hostname, Port}
-    new::Tuple{Hostname, Port}
-end
-immutable NoOp <: InternalConsensusCommand
-end
-####################################################################################
+abstract ConsensusResponse <: Response
+#####################################
+##    Components of the log        ##
+#####################################
+@enum Fate Decided Pending Forgotten
 type Slot
     num::SlotNum
     n_p::Int64
     n_a::Int64
-    v_a::Nullable{ConsensusCommand}
+    v_a::Nullable{CriticalCommand}
     fate::Fate
     lock::Lock
     condition::LevelTrigger
     # Slot(num, n_p, n_a, v_a, fate) = new(num, n_p, n_a, v_a, fate, Lock(), LevelTrigger())
 end
-type PrepareArgs
+type Log
+    slots::Dict{SlotNum, Slot}#Faster structures?
+    maxSlot::Int
+end
+####################################################################################
+
+type PrepareArgs <: ConsensusCommand
     slot_num::SlotNum
     n::Int64
-    info::ExtraInfo
 end
-type PrepareReply
+
+type PrepareReply <: ConsensusResponse
     slot_num::SlotNum
     Ok::Bool
     n::Int64
     n_a::Int64
-    v_a::Nullable{ConsensusCommand}
-    info::ExtraInfo
+    v_a::Nullable{CriticalCommand}
 end
-type AcceptArgs
+
+function Handle(px::Paxos,args::PrepareArgs)
+    s = safe_getSlot!(px,args.slot_num)
+    holding(s.lock, "HandlePrepare $(s.num)") do
+        if args.n > s.n_p
+            persistently(px, s) do
+                s.n_p = args.n
+            end
+            WithExtraInfo(PrepareReply(args.slot_num, true, s.n_p, s.n_a, s.v_a), ExtraInfo(px))
+        else
+            WithExtraInfo(PrepareReply(args.slot_num, false, s.n_p, s.n_a, s.v_a), ExtraInfo(px))
+        end
+    end
+
+end
+type AcceptArgs <: ConsensusCommand
     slot_num::SlotNum
     n::Int64
-    v::ConsensusCommand
-    info::ExtraInfo
+    v::CriticalCommand
 end
-type AcceptReply
+type AcceptReply <: ConsensusResponse
     slot_num::SlotNum
     Ok::Bool
     n::Int64
-    v::ConsensusCommand
-    info::ExtraInfo
+    v::CriticalCommand
 end
-type DecideArgs
+function Handle(px::Paxos, args::AcceptArgs)
+    s = safe_getSlot!(px, args.slot_num)
+    holding(s.lock, "HandleAccept $(s.num)") do
+        if args.n >= s.n_p
+            persistently(px,s) do
+                s.n_p = args.n
+                s.n_a = args.n
+                s.v_a = Nullable(args.v)
+            end
+            WithExtraInfo(AcceptReply(args.slot_num, true, s.n_p, args.v), ExtraInfo(px))
+        else
+            WithExtraInfo(AcceptReply(args.slot_num, false, 0, NoOp()), ExtraInfo(px))
+        end
+
+    end
+end
+type DecideArgs <: ConsensusCommand
     slot_num::SlotNum
-    v::ConsensusCommand
-    info::ExtraInfo
+    v::CriticalCommand
 end
-type DecideReply
+type DecideReply <: ConsensusResponse
     slot_num::SlotNum
     Ok::Bool
-    info::ExtraInfo
 end
 
-
-
-type Log
-    slots::Dict{SlotNum, Slot}
-    maxSlot::Int
+function Handle(px::Paxos, args::DecideArgs)
+    s = safe_getSlot!(px, args.slot_num)
+    holding(s.lock, "$(s.num)") do
+        if s.fate != Decided
+            persistently(px, s) do
+                s.v_a = Nullable(args.v)
+                s.fate = Decided
+            end
+            @async signal(s.condition)
+        end
+        WithExtraInfo(DecideReply(args.slot_num, true), ExtraInfo(px))
+    end
 end
-
-
-
-type Context
-    port::Int64
-    peers::Array{Tuple{Hostname, Port},1}
-    transition::Function
-    slot_dir
-    forget_f
-    snapshot_f
-    slot_num_f
+#########################
+## Other msg Types     ##
+#########################
+immutable Ping <: NonCriticalCommand
 end
-type Paxos{ Snapshot}
-    self::Int64
-    log::Log
+immutable PingReply <: Response
+end
+immutable SwapServer <: InternalCriticalCommand
+    old::Tuple{Hostname, Port}
+    new::Tuple{Hostname, Port}
+end
+immutable NoOp <: InternalCriticalCommand
+end
+function Handle(px::Paxos,args::NoOp)
+end
+##########################
+## PiggyBacking Command ##
+##########################
+
+immutable ExtraInfo
     completed::Array{Int64, 1}
-    snapshot::Snapshot
-    forgot::Int64
-    context::Context
-    lock::Lock
-    forgetChan::Channel{Array{Int64, 1}}
-    Paxos(self, log, completed, snapshot, forgot, context) = new(self,
-    log, completed, snapshot, forgot, context, Lock(),
-    Channel{Array{Int64, 1}}(5))
+    ExtraInfo(px::Paxos) = new(completed(px))
 end
+
+function safe_getExtraInfo(px::Paxos)
+    holding(lock(px), "getExtraInfo") do
+        ExtraInfo(px)
+    end
+end
+type WithExtraInfo
+    command
+    info::ExtraInfo
+end
+@inline function getExtraInfo(v::WithExtraInfo)
+    v.info
+end
+
+function Handle(px::Paxos, command::WithExtraInfo)
+    try
+        @async put!(forgetChan(px), command.info.completed)
+    catch err
+        # print(err)
+    end
+    Handle(px, command.command)
+end
+
+
+
+
+
+##############################################
 
 @inline function notNull(f::Function, m_v, def)
     if !isnull(m_v)
@@ -124,35 +244,31 @@ end
     end
 end
 
-function getExtraInfo{S}(px::Paxos{S})
-    holding(px.lock, "getExtraInfo") do
-        ExtraInfo(px.completed)
-    end
-end
 function message(px, m, chan, i)
-    host, port = px.context.peers[i]
+    host, port = peers(px)[i]
     io = connect(host, port)
     serialize(io, m)
     flush(io)
     val = deserialize(io)
     close(io)
+    v =  if typeof(val) == WithExtraInfo
+        @async put!(forgetChan(px), val.info.completed)
+        val.command
+    else
+        val
+    end
     notNull(chan) do ch
-        put!(ch, val)
+        put!(ch, v)
     end
-    try
-        put!(px.forgetChan, val.info.completed)
-    catch err
-        print(err)
-    end
-    val
+    v
 end
-function broadcast{S}(px::Paxos{S}, m, chan)
-    @async for i = 1:length(px.context.peers)
+function broadcast(px::Paxos, m, chan)
+    @async for i = 1:length(peers(px))
         message(px, m, Nullable(chan), i)
     end
 end
-function broadcast{S}(px::Paxos{S}, m)
-    @async for i = 1:length(px.context.peers)
+function broadcast(px::Paxos, m)
+    @async for i = 1:length(peers(px))
         message(px, m, Nullable(),i)
     end
 end
@@ -161,11 +277,11 @@ end
 function getMaxSlot(l::Log)
     l.maxSlot
 end
-function getSlot!{S}(px::Paxos{S}, s::SlotNum)
-    if s <= px.forgot
+function getSlot!(px::Paxos, s::SlotNum)
+    if s <= forgot(px)
         Slot(0,0,0,Nullable(), Forgotten, Lock(), LevelTrigger())
     else
-        l = px.log    
+        l = log(px)
         try
             l.slots[s]
         catch KeyError
@@ -175,17 +291,17 @@ function getSlot!{S}(px::Paxos{S}, s::SlotNum)
         end
     end
 end
-function safe_getSlot!{S}(px::Paxos{S}, s::SlotNum)
-    holding(px.lock, "safe_getSlot! $(s)") do
+function safe_getSlot!(px::Paxos, s::SlotNum)
+    holding(lock(px), "safe_getSlot! $(s)") do
         getSlot!(px, s)
     end
 end
 
-function getSlot{S}(px::Paxos{S}, s::SlotNum)
-    if s <= px.forgot
+function getSlot(px::Paxos, s::SlotNum)
+    if s <= forgot(px)
         Nullable(Slot(0,0,0,Nullable(), Forgotten, Lock(), LevelTrigger()))
     else
-        l = px.log    
+        l = log(px)
         try
             Nullable(l.slots[s])
         catch KeyError
@@ -193,68 +309,23 @@ function getSlot{S}(px::Paxos{S}, s::SlotNum)
         end
     end
 end
-function safe_getSlot{S}(px::Paxos{S}, s::SlotNum)
-    holding(px.lock, "safe_getSlot $(s)") do
+function safe_getSlot(px::Paxos, s::SlotNum)
+    holding(lock(px), "safe_getSlot $(s)") do
         getSlot(px, s)
     end
 end
 
-function persistently(f::Function,  slot::Slot)
-    open("$(ENV["ROCK_PATH"])/slots/$(slot.num)", "w+") do io
+function persistently(f::Function,  px::Paxos, slot::Slot)
         f()
-        serialize(io, slot)
-        
-    end
-end
-function Handle{S}(px::Paxos{S},args::PrepareArgs)
-    s = safe_getSlot!(px,args.slot_num)
-    holding(s.lock, "HandlePrepare $(s.num)") do
-        if args.n > s.n_p
-            persistently(s) do
-                s.n_p = args.n
-            end
-            PrepareReply(args.slot_num, true, s.n_p, s.n_a, s.v_a, ExtraInfo(px.completed))
-        else
-            PrepareReply(args.slot_num, false, s.n_p, s.n_a, s.v_a, ExtraInfo(px.completed))
-        end
-    end
-
-end
-function Handle{S}(px::Paxos{S},args::NoOp)
+        syncSlot(px, slot)
 end
 
-function Handle{S}(px::Paxos{S}, args::AcceptArgs)
-    s = safe_getSlot!(px, args.slot_num)
-    holding(s.lock, "HandleAccept $(s.num)") do
-        if args.n >= s.n_p
-            persistently(s) do
-                s.n_p = args.n
-                s.n_a = args.n
-                s.v_a = Nullable(args.v)
-            end
-            AcceptReply(args.slot_num, true, s.n_p, args.v, ExtraInfo(px.completed))
-        else
-            AcceptReply(args.slot_num, false, 0, NoOp(), ExtraInfo( px.completed))
-        end
 
-    end
-end
-function Handle{S}(px::Paxos{S}, args::DecideArgs)
-    s = safe_getSlot!(px, args.slot_num)
-    holding(s.lock, "$(s.num)") do
-        if s.fate != Decided
-            persistently(s) do
-                s.v_a = Nullable(args.v)
-                s.fate = Decided
-            end
-            @async signal(s.condition)
-        end
-    end
-    DecideReply(args.slot_num, true, ExtraInfo(px.completed))
-end
-
-function acceptPhase{S}(px::Paxos{S},slot_num::SlotNum, n::Int64, v::ConsensusCommand, majority)
-    accept = AcceptArgs(slot_num, n, v, getExtraInfo(px))
+##################################
+##    Proposer functionality    ##
+##################################
+function acceptPhase(px::Paxos,slot_num::SlotNum, n::Int64, v::CriticalCommand, majority)
+    accept = WithExtraInfo(AcceptArgs(slot_num, n, v),  safe_getExtraInfo(px))
     chan = Base.Channel{AcceptReply}(5)
     broadcast(px, accept, chan)
     positives = 0
@@ -265,7 +336,7 @@ function acceptPhase{S}(px::Paxos{S},slot_num::SlotNum, n::Int64, v::ConsensusCo
         if r.Ok
             positives += 1
             if positives >= majority
-                decide = DecideArgs(slot_num, v, getExtraInfo(px))
+                decide = WithExtraInfo(DecideArgs(slot_num, v), safe_getExtraInfo(px))
                 broadcast(px, decide)
                 return true
             end
@@ -281,16 +352,16 @@ function acceptPhase{S}(px::Paxos{S},slot_num::SlotNum, n::Int64, v::ConsensusCo
     end
 end
 
-function proposer{S}(px::Paxos{S}, v::ConsensusCommand, slot_num::SlotNum)
+function proposer(px::Paxos, v::CriticalCommand, slot_num::SlotNum)
     epoch = -1
-    majority = div(length(px.context.peers) +2, 2)
-    while (holding(px.lock, "Proposer While Loop $slot_num") do
+    majority = div(length(peers(px)) +2, 2)
+    while (holding(lock(px), "Proposer While Loop $slot_num") do
            getSlot!(px, slot_num).fate == Pending
            end)
         epoch += 1
-        n = length(px.context.peers)*epoch + px.self + 1
+        n = length(peers(px))*epoch + self(px) + 1
         chan = Base.Channel{PrepareReply}(5)# Magic number, not super important! Could be 1
-        prep = PrepareArgs(slot_num, n, getExtraInfo(px))
+        prep = WithExtraInfo(PrepareArgs(slot_num, n), safe_getExtraInfo(px))
         broadcast(px, prep, chan)
         positives = 0
         negatives = 0
@@ -322,22 +393,27 @@ function proposer{S}(px::Paxos{S}, v::ConsensusCommand, slot_num::SlotNum)
     end
     
 end
-function Handle{S}(px::Paxos{S}, args::ConsensusCommand)
-    slot_num =  holding(px.lock, "Handle Command") do
-        getMaxSlot(px.log)+1
+function Handle(px::Paxos, args::CriticalCommand)
+    slot_num =  holding(lock(px), "Handle Command") do
+        getMaxSlot(log(px))+1
     end
     @async proposer(px, args, slot_num)
     slot_num
     
 end
 
-function Handle{ S}(px::Paxos{ S}, args::Ping)
+function Handle(px::Paxos, args::Ping)
     PingReply()
 end
 
 
-function RPCServer{Snapshot}(px::Paxos{Snapshot})
-    server = listen(px.context.port)
+
+######################
+##     Tasklets     ##
+######################
+
+function RPCServer(px::Paxos)
+    server = listen(port(px))
     while true
         conn = accept(server)
         @async begin
@@ -348,27 +424,22 @@ function RPCServer{Snapshot}(px::Paxos{Snapshot})
                     try
                         r = Handle(px, args)
                         serialize(conn,r)
-                        try
-                            put!(px.forgetChan, args.info.completed)
-                        catch err
-                            # print(err)
-                        end
                     catch err
                         print("Could not handle! $err")
                     end
                 end
             catch err
-                # print("Connection Failed With $err on node $(px.self)")
+                # print("Connection Failed With $err on node $(self(px))")
 
             end
         end
     end
 end
-function LogCrawler{ Snapshot}(px::Paxos{Snapshot})
+function LogCrawler(px::Paxos)
     while true
         changed = false
         while true
-            next = safe_getSlot(px, px.completed[px.self]+1)
+            next = safe_getSlot(px, completed(px)[self(px)]+1)
             if isnull(next)
                 break
             end
@@ -376,15 +447,15 @@ function LogCrawler{ Snapshot}(px::Paxos{Snapshot})
             timeout = () -> @async proposer(px, NoOp(), next.num) # TODO: Can we guarantee that command has a No_Op more idomatically?
             waitSignal(next.condition, 0.01, 3.0, timeout) # level trigger wait until the slot is done.
             changed = holding(next.lock, "Log Crawler Read $(next.num)") do
-                if next.fate != Decided # Should always be true!
+                if next.fate != Decided # Should always be Decided!
                     throw(ErrorException("LogCrawler condtion variable triggered while fate was not decided"))
                 end
-                px.completed[px.self] += 1
+                completed(px)[self(px)] += 1
                 notNull(next.v_a, false) do v
-                    if typeof(v) <: ExternalConsensusCommand
-                        px.context.transition(px.snapshot, v)
+                    if typeof(v) <: ExternalCriticalCommand
+                        transition(px, v)
                         true
-                    elseif typeof(next.v_a.value) <: InternalConsensusCommand
+                    elseif typeof(next.v_a.value) <: InternalCriticalCommand
                         false
                     else
                         @show typeof(next.v_a.value)
@@ -393,13 +464,9 @@ function LogCrawler{ Snapshot}(px::Paxos{Snapshot})
                 end
             end
             if changed
-                holding(px.lock, "Log Crawler write") do
-                    open(px.context.slot_num_f, "w") do io
-                        serialize(io, px.completed[px.self])
-                    end
-                    open(px.context.snapshot_f, "w") do io
-                        serialize(io, px.snapshot)
-                    end
+                holding(lock(px), "Log Crawler write") do
+                    syncCompleted(px)
+                    syncSnapshot(px)
                 end
             end
 
@@ -407,40 +474,29 @@ function LogCrawler{ Snapshot}(px::Paxos{Snapshot})
         wait(Timer(1))
     end
 end
-function Forgettor{Snapshot}(px::Paxos{Snapshot})
+function Forgettor(px::Paxos)
     while true
-        completed = take!(px.forgetChan)
+        completed = take!(forgetChan(px))
         # print("enter Forgettor\n")
         # @show px.completed
         # @show completed
-        holding(px.lock, "Forgettor") do
-            px.completed = max(px.completed, completed)
-            px.forgot = min(px.completed...)
+        holding(lock(px), "Forgettor") do
+            updateCompleted(px, completed) # updates completed and forgotten fields and deletes elements from log
         end
         # @show px.completed
 
-        # Update the forgot index first because we want to prevent the
-        # case where we delete a file, then crash, and think our
-        # forgot index is too high
-        open(px.context.forget_f, "w") do io
-            serialize(io, px.forgot)
-        end
-        for f=readdir(px.context.slot_dir)
-            if parse(Int64, f) <= px.forgot
-                rm("$(px.context.slot_dir)/$f")
-            end
-        end
+        syncForgot(px)
 
     end
 end
 
-function Heartbeat{Snapshot}(px::Paxos{Snapshot})
+function Heartbeat(px::Paxos)
     while true
-        arr = holding(px.lock) do
-            arr = fill(true, length(px.context.peers))
+        arr = holding(lock(px)) do
+            arr = fill(true, length(peers(px)))
             m = Ping()
-            @async for i = 1:length(px.context.peers)
-                host, port = px.context.peers[i]
+            @async for i = 1:length(peers(px))
+                host, port = peers(px)[i]
                 try
                     io = connect(host, port)
                     serialize(io, m)
@@ -471,49 +527,139 @@ function Heartbeat{Snapshot}(px::Paxos{Snapshot})
                 print("$i dead!\n")
             end
         end
-            
+        
     end
 end
 
-function node{Snapshot}(context::Context, self::Int64, snapshot::Snapshot)
-    # print("Starting on $(context.port)\n")
-    
-    mkpath(context.slot_dir)
-    log = Dict{SlotNum, Slot}()
-    m = -1
-    for f=readdir(context.slot_dir)
-        open("$(context.slot_dir)/$f") do io
-            s = deserialize(io)
-            log[s.num] = s
-            m = max(m,s.num)
+####################################
+##   Paxos Instance Components    ##
+##   Not "integrated" to abstract ## 
+##   FS out                       ##
+####################################
+type Context
+    port::Int64
+    peers::Array{Tuple{Hostname, Port},1}
+    transition::Function
+    slot_dir
+    forget_f
+    snapshot_f
+    slot_num_f
+end
+type Instance{ Snapshot} <: Paxos
+    self::Int64
+    log::Log
+    completed::Array{Int64, 1}
+    snapshot::Snapshot
+    forgot::Int64
+    context::Context
+    lock::Lock
+    forgetChan::Channel{Array{Int64, 1}}
+    Instance(self, log, completed, snapshot, forgot, context) = new(self,
+                                                                 log, completed, snapshot, forgot, context, Lock(),
+                                                                 Channel{Array{Int64, 1}}(5))
+end
+
+function port(px::Instance)#::Int64
+    px.context.port
+end
+function peers(px::Instance)#::Array{Tuple{Hostname, Port},1}
+    px.context.peers
+end
+function transition(px::Instance, v::ExternalCriticalCommand)#:: Function
+    px.context.transition(px, v)
+end
+function self(px::Instance)#::Int64
+    px.self
+end
+function log(px::Instance)#::Log
+    px.log
+end
+function completed(px::Instance)#::Array{Int64, 1}
+    px.completed
+end
+function forgot(px::Instance)##::Int64
+    px.forgot
+end
+function context(px::Instance)#::Context
+    px.context
+end
+function lock(px::Instance)#::Lock
+    px.lock
+end
+function forgetChan(px::Instance)#::Channel{Array{Int64, 1}}
+    px.forgetChan
+end
+function updateCompleted(px::Instance, completed)
+    px.completed = max(px.completed, completed)
+    forgot = min(px.completed...)
+    for i = px.forgot:forgot
+        delete!(px.log.slots, i)
+    end
+    px.forgot = forgot
+end
+function syncSlot(px::Instance, slot::Slot)
+    open("$(px.context.slot_dir)/$(slot.num)", "w+") do io
+        serialize(io, slot)
+    end
+end
+
+function syncForgot(px::Instance)
+    # Update the forgot index first because we want to prevent the
+    # case where we delete a file, then crash, and think our
+    # forgot index is too high
+    open(context(px).forget_f, "w") do io
+        serialize(io, forgot(px))
+    end
+    for f=readdir(context(px).slot_dir)
+        if parse(Int64, f) <= forgot(px)
+            rm("$(context(px).slot_dir)/$f")
         end
     end
+end
+function syncCompleted(px::Instance,)
+    open(context(px).slot_num_f, "w") do io
+        serialize(io, completed(px)[self(px)])
+    end
+end
 
+function syncSnapshot(px::Instance)
+    open(context(px).snapshot_f, "w") do io
+        serialize(io,px.snapshot)
+    end
+end
+function read_file_or_default(f, d)
     if isfile(context.snapshot_f)
         open(context.snapshot_f) do io
-            snapshot = deserialize(io)
+            deserialize(io)
         end
+    else
+        d
     end
+end
+function node{Snapshot}(context::Context, self::Int64, snapshot::Snapshot)
+    # print("Starting on $(context.port)\n")
+
+    # Ensure Path exists
+    mkpath(context.slot_dir)
+    log = Dict{SlotNum, Slot}() 
+    m = -1
+    for f=readdir(context.slot_dir)
+        s= read_file_or_default("$(context.slot_dir)/$f", ()) # () should never be returned
+        log[s.num] = s
+        m = max(m,s.num)
+    end
+    snapshot = read_file_or_default(context.snapshot_f, snapshot)
 
     slot_nums = fill(-1,length(context.peers))
-    if isfile(context.slot_num_f)
-        open(context.slot_num_f) do io
-            slot_nums[self] = deserialize(io)
-        end
-    end
+    slot_nums[self] = read_file_or_default(context.slot_num_f, -1)
 
-    forget = -1
+    forget = read_file_or_default( context.forget_f, -1)
 
-    if isfile(context.forget_f)
-        open(context.forget_f) do io
-            forget = deserialize(io)
-        end
-    end
-    px = Paxos{Snapshot}(self, Log(log, m),  slot_nums, snapshot, forget,  context)
-    @async RPCServer(px)
+    px = Instance{Snapshot}(self, Log(log, m),  slot_nums, snapshot, forget,  context)
     @async Forgettor(px)
     @async Heartbeat(px)
-    LogCrawler(px)
+    @async LogCrawler(px)
+    RPCServer(px)
 
 end
 type Client
@@ -523,7 +669,7 @@ end
 function client(host::AbstractString, port::Int64)
     Client(connect(host, port))
 end
-function command{Command}(c::Client, cmd::Command)
+function command(c::Client, cmd::Command)
 
     serialize(c.conn, cmd)
     flush(c.conn)

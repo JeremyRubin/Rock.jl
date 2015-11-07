@@ -3,21 +3,21 @@ include("Rock.jl")
 module KVStore
 import Rock
 @enum Op Put Append
-type Command <: Rock.ExternalConsensusCommand
+type Command <: Rock.ExternalCriticalCommand
     op::Op
     k::ASCIIString
     v::ASCIIString
     Command(op, k,v) = new(op, k,v)
 end
 typealias Snapshot Dict{ASCIIString, ASCIIString}
-function transition(d, t)
+function transition(px, t)
     if t.op == Put
-        d[t.k] = t.v
+        px.snapshot[t.k] = t.v
     elseif t.op == Append
         try
-            d[t.k] = "$(d[t.k])$(t.v)"
+            px.snapshot[t.k] = "$(ps.snapshot[t.k])$(t.v)"
         catch KeyError
-            d[t.k] = t.v
+            px.snapshot[t.k] = t.v
         end
         
     end
