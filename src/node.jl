@@ -1,4 +1,3 @@
-include("Locks.jl")
 include("Rock.jl")
 module KVStore
 import Rock

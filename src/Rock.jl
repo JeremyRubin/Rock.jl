@@ -17,53 +17,54 @@ abstract Paxos
 
 
 # The following API must be supported!!
-# function port(px::Paxos)#::Int64
-#     throw(ErrorException("Please Implement"))
-# end
-# function peers(px::Paxos)#::Array{Tuple{Hostname, Port},1}
-#     throw(ErrorException("Please Implement"))
-# end
-# end
-# function transition(px::Paxos, v::ExternalCriticalCommand)#:: Function
-#     throw(ErrorException("Please Implement"))
-
-# end
-# function syncCompleted(px::Paxos)
-#     throw(ErrorException("Please Implement"))
-# end
-# function syncForgot(px::Paxos)
-#     throw(ErrorException("Please Implement"))
-# end
-# function syncSnapshot(px::Paxos)
-#     throw(ErrorException("Please Implement"))
-# end
-# function syncSlot(px::Paxos, s::Slot)
-#     throw(ErrorException("Please Implement"))
-# end
-# function self(px::Paxos)#::Int64
-#     throw(ErrorException("Please Implement"))
-# end
-# function log(px::Paxos)#::Log
-#     throw(ErrorException("Please Implement"))
-# end
-# function completed(px::Paxos)#::Array{Int64, 1}
-#     throw(ErrorException("Please Implement"))
-# end
-# function updateCompleted(px::Paxos, completed::Array{Int64, 1})
-#     throw(ErrorException("Please Implement"))
-# end
-# function forgot(px::Paxos)##::Int64
-#     throw(ErrorException("Please Implement"))
-# end
-# function context(px::Paxos)#::Context
-#     throw(ErrorException("Please Implement"))
-# end
-# function lock(px::Paxos)#::Lock
-#     throw(ErrorException("Please Implement"))
-# end
-# function forgetChan(px::Paxos)#::Channel{Array{Int64, 1}}
-#     throw(ErrorException("Please Implement"))
-# end
+# TODO: Implement this requirement via traits
+#    # function port(px::Paxos)#::Int64
+#    #     throw(ErrorException("Please Implement"))
+#    # end
+#    # function peers(px::Paxos)#::Array{Tuple{Hostname, Port},1}
+#    #     throw(ErrorException("Please Implement"))
+#    # end
+#    # end
+#    # function transition(px::Paxos, v::ExternalCriticalCommand)#:: Function
+#    #     throw(ErrorException("Please Implement"))
+#    
+#    # end
+#    # function syncCompleted(px::Paxos)
+#    #     throw(ErrorException("Please Implement"))
+#    # end
+#    # function syncForgot(px::Paxos)
+#    #     throw(ErrorException("Please Implement"))
+#    # end
+#    # function syncSnapshot(px::Paxos)
+#    #     throw(ErrorException("Please Implement"))
+#    # end
+#    # function syncSlot(px::Paxos, s::Slot)
+#    #     throw(ErrorException("Please Implement"))
+#    # end
+#    # function self(px::Paxos)#::Int64
+#    #     throw(ErrorException("Please Implement"))
+#    # end
+#    # function log(px::Paxos)#::Log
+#    #     throw(ErrorException("Please Implement"))
+#    # end
+#    # function completed(px::Paxos)#::Array{Int64, 1}
+#    #     throw(ErrorException("Please Implement"))
+#    # end
+#    # function updateCompleted(px::Paxos, completed::Array{Int64, 1})
+#    #     throw(ErrorException("Please Implement"))
+#    # end
+#    # function forgot(px::Paxos)##::Int64
+#    #     throw(ErrorException("Please Implement"))
+#    # end
+#    # function context(px::Paxos)#::Context
+#    #     throw(ErrorException("Please Implement"))
+#    # end
+#    # function lock(px::Paxos)#::Lock
+#    #     throw(ErrorException("Please Implement"))
+#    # end
+#    # function forgetChan(px::Paxos)#::Channel{Array{Int64, 1}}
+#    #     throw(ErrorException("Please Implement"))
+#    # end
 
 # Base Message Type, not too useful
 abstract BaseMessage
