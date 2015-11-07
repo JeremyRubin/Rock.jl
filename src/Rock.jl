@@ -1,5 +1,5 @@
 module Rock
-using Locks
+using LockUtils
 
 ############################
 ##    Base/Abstract types ##
