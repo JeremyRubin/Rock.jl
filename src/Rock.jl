@@ -420,7 +420,6 @@ function RPCServer(px::Paxos)
             try
                 while true
                     args = deserialize(conn)
-                    @show args
                     try
                         r = Handle(px, args)
                         serialize(conn,r)
@@ -458,7 +457,6 @@ function LogCrawler(px::Paxos)
                     elseif typeof(next.v_a.value) <: InternalCriticalCommand
                         false
                     else
-                        @show typeof(next.v_a.value)
                         false
                     end
                 end
@@ -477,13 +475,9 @@ end
 function Forgettor(px::Paxos)
     while true
         completed = take!(forgetChan(px))
-        # print("enter Forgettor\n")
-        # @show px.completed
-        # @show completed
         holding(lock(px), "Forgettor") do
             updateCompleted(px, completed) # updates completed and forgotten fields and deletes elements from log
         end
-        # @show px.completed
 
         syncForgot(px)
 
@@ -624,12 +618,13 @@ end
 
 function syncSnapshot(px::Instance)
     open(context(px).snapshot_f, "w") do io
+        @show px.snapshot
         serialize(io,px.snapshot)
     end
 end
 function read_file_or_default(f, d)
-    if isfile(context.snapshot_f)
-        open(context.snapshot_f) do io
+    if isfile(f)
+        open(f) do io
             deserialize(io)
         end
     else

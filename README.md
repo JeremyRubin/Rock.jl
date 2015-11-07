@@ -14,4 +14,4 @@ Try running the example in src/node.jl by doing the following in 4 different she
 
 ```export ROCK_PATH=/tmp/rock3 && export ROCK_PORT=8083 && julia node.jl```
 
-```export ROCK_PATH=/tmp/rock0 && export ROCK_PORT=8080 && julia node.jl```
+```export ROCK_PATH=/tmp/rock0 && export ROCK_PORT=8080 && julia node.jl KEY VALUE```

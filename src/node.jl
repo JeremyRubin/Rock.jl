@@ -15,7 +15,7 @@ function transition(px, t)
         px.snapshot[t.k] = t.v
     elseif t.op == Append
         try
-            px.snapshot[t.k] = "$(ps.snapshot[t.k])$(t.v)"
+            px.snapshot[t.k] = "$(px.snapshot[t.k])$(t.v)"
         catch KeyError
             px.snapshot[t.k] = t.v
         end
@@ -48,7 +48,7 @@ peers = [("localhost", 8081), ("localhost", 8082), ("localhost", 8083) ]::Array{
 if port  > 8080
     KVStore.mk(port, peers)
 else
-    KVStore.append("localhost",8081, "HELLO", "WORLD")
+    KVStore.put("localhost",8081, ARGS...)
 end
 
 
