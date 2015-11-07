@@ -2,12 +2,11 @@ include("Locks.jl")
 include("Rock.jl")
 module KVStore
 import Rock
-@enum Op Put Append NoOp
-type Command
+@enum Op Put Append
+type Command <: Rock.ExternalConsensusCommand
     op::Op
     k::ASCIIString
     v::ASCIIString
-    Command() = new(NoOp, "", "")
     Command(op, k,v) = new(op, k,v)
 end
 typealias Snapshot Dict{ASCIIString, ASCIIString}
@@ -28,11 +27,11 @@ function mk(port, peers::Array{Tuple{ASCIIString, Int64},1})
     forget_f = "$(ENV["ROCK_PATH"])/forget.txt"
     snapshot_f = "$(ENV["ROCK_PATH"])/snapshot.txt"
     slot_num_f = "$(ENV["ROCK_PATH"])/slot_num.txt"
-    ctx = Rock.Context(Command, Snapshot, port, peers, transition, slot_dir, forget_f, snapshot_f, slot_num_f)
+    ctx = Rock.Context(port, peers, transition, slot_dir, forget_f, snapshot_f, slot_num_f)
     Rock.node(ctx,  port-8080, Snapshot())
 end
 function command(h, p, c)
-    Rock.command(Rock.client(Command, "localhost", 8081), c)
+    Rock.command(Rock.client("localhost", 8081), c)
 end
 function append(h,p,k,v)
     command(h,p, Command(Append, k, v))
