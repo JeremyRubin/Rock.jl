@@ -14,23 +14,14 @@ end
 typealias Snapshot Dict{ASCIIString, ASCIIString}
 function transition(px, t)
     if t.op == Put
-        px.snapshot[t.k] = t.v
+        SQLite.query(Rock.db(px), "insert into snapshot values (?,?)",[t.k,t.v])
     elseif t.op == Append
-        try
-            px.snapshot[t.k] = "$(px.snapshot[t.k])$(t.v)"
-        catch KeyError
-            px.snapshot[t.k] = t.v
-        end
-        
+        SQLite.query(Rock.db(px),"insert into snapshot values (?, ?) on duplicate key update snapshot set V = V||? where K = ?", [t.k, t.v, t.v, t.k])
     end
 end
 function mk(port, peers::Array{Tuple{ASCIIString, Int64},1}, path::ASCIIString)
-    slot_dir = "$(path)/slots"
-    forget_f = "$(path)/forget.txt"
-    snapshot_f = "$(path)/snapshot.txt"
-    slot_num_f = "$(path)/slot_num.txt"
-    ctx = Rock.Context(port, peers, transition, slot_dir, forget_f, snapshot_f, slot_num_f)
-    Rock.node(ctx,  port-8080, Snapshot())
+    ctx = Rock.Context(port, peers, transition, "$path/sqlite.db")
+    Rock.node(ctx,  port-8080)
 end
 function command(h, p, c)
     Rock.command(Rock.client("localhost", 8081), c)

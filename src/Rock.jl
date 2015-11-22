@@ -1,6 +1,9 @@
 module Rock
 using LockUtils
 
+using SQLite
+using Logging
+@Logging.configure(level=DEBUG)
 ############################
 ##    Base/Abstract types ##
 ############################
@@ -33,9 +36,6 @@ abstract Paxos
 #    #     throw(ErrorException("Please Implement"))
 #    # end
 #    # function syncForgot(px::Paxos)
-#    #     throw(ErrorException("Please Implement"))
-#    # end
-#    # function syncSnapshot(px::Paxos)
 #    #     throw(ErrorException("Please Implement"))
 #    # end
 #    # function syncSlot(px::Paxos, s::Slot)
@@ -87,28 +87,21 @@ abstract ConsensusResponse <: Response
 ##    Components of the log        ##
 #####################################
 @enum Fate Decided Pending Forgotten
-type Slot
+immutable Slot
     num::SlotNum
     n_p::Int64
     n_a::Int64
     v_a::Nullable{CriticalCommand}
     fate::Fate
-    lock::Lock
-    condition::LevelTrigger
-    # Slot(num, n_p, n_a, v_a, fate) = new(num, n_p, n_a, v_a, fate, Lock(), LevelTrigger())
-end
-type Log
-    slots::Dict{SlotNum, Slot}#Faster structures?
-    maxSlot::Int
 end
 ####################################################################################
 
-type PrepareArgs <: ConsensusCommand
+immutable PrepareArgs <: ConsensusCommand
     slot_num::SlotNum
     n::Int64
 end
 
-type PrepareReply <: ConsensusResponse
+immutable PrepareReply <: ConsensusResponse
     slot_num::SlotNum
     Ok::Bool
     n::Int64
@@ -130,12 +123,12 @@ function Handle(px::Paxos,args::PrepareArgs)
     end
 
 end
-type AcceptArgs <: ConsensusCommand
+immutable AcceptArgs <: ConsensusCommand
     slot_num::SlotNum
     n::Int64
     v::CriticalCommand
 end
-type AcceptReply <: ConsensusResponse
+immutable AcceptReply <: ConsensusResponse
     slot_num::SlotNum
     Ok::Bool
     n::Int64
@@ -157,11 +150,11 @@ function Handle(px::Paxos, args::AcceptArgs)
 
     end
 end
-type DecideArgs <: ConsensusCommand
+immutable DecideArgs <: ConsensusCommand
     slot_num::SlotNum
     v::CriticalCommand
 end
-type DecideReply <: ConsensusResponse
+immutable DecideReply <: ConsensusResponse
     slot_num::SlotNum
     Ok::Bool
 end
@@ -186,6 +179,12 @@ immutable Ping <: NonCriticalCommand
 end
 immutable PingReply <: Response
 end
+
+
+function Handle(px::Paxos, args::Ping)
+    PingReply()
+end
+
 immutable SwapServer <: InternalCriticalCommand
     old::Tuple{Hostname, Port}
     new::Tuple{Hostname, Port}
@@ -208,7 +207,7 @@ function safe_getExtraInfo(px::Paxos)
         ExtraInfo(px)
     end
 end
-type WithExtraInfo
+immutable WithExtraInfo
     command
     info::ExtraInfo
 end
@@ -275,20 +274,31 @@ function broadcast(px::Paxos, m)
 end
 
 
-function getMaxSlot(l::Log)
-    l.maxSlot
+function getMaxSlot(px::Paxos)
+    d = SQLite.query(db(px), "select max(K) from slots").data[1]
+    if length(d) == 1
+        isNull(d, -1) do v
+            v
+        end
+    else
+        -1
+    end
+    
 end
 function getSlot!(px::Paxos, s::SlotNum)
     if s <= forgot(px)
-        Slot(0,0,0,Nullable(), Forgotten, Lock(), LevelTrigger())
+        Slot(0,0,0,Nullable(), Forgotten)
     else
-        l = log(px)
-        try
-            l.slots[s]
-        catch KeyError
-            l.slots[s] = Slot(s, 0,0,Nullable(), Pending, Lock(), LevelTrigger())
-            l.maxSlot = max(l.maxSlot, s)
-            getSlot!(px, s)
+        SQLite.transaction(db(px)) do
+            obj = SQLite.query(db(px), "select K, n_p,n_a, v_a, fate from slots where (K=?) limit 1", [s]).data
+            if length(obj[1]) > 0 
+                command = deserialize(IOBuffer(obj[4]))
+                Slot(obj[1].value, obj[2].value,obj[3].value, command, Fate(obj[5].value))
+            else
+                v = Slot(s, 0,0,Nullable(), Pending)
+                SQLite.query(db(px), "insert into slots values (?, ?, ?, ?, ?)", [s, 0, 0,  Int(Pending), Nullable()])
+                v
+            end
         end
     end
 end
@@ -299,16 +309,21 @@ function safe_getSlot!(px::Paxos, s::SlotNum)
 end
 
 function getSlot(px::Paxos, s::SlotNum)
+
     if s <= forgot(px)
-        Nullable(Slot(0,0,0,Nullable(), Forgotten, Lock(), LevelTrigger()))
+        Nullable(Slot(0,0,0,Nullable(), Forgotten))
     else
-        l = log(px)
-        try
-            Nullable(l.slots[s])
-        catch KeyError
-            Nullable()
+        SQLite.transaction(db(px)) do
+            obj = SQLite.query(db(px), "select K, n_p,n_a, v_a, fate from slots where (K=?) limit 1", [s]).data
+            if length(obj[1]) > 0
+                command = deserialize(IOBuffer(obj[4]))
+                Nullable(Slot(obj[1].value, obj[2].value,obj[3].value, command, Fate(obj[5].value)))
+            else
+                Nullable()
+            end
         end
     end
+
 end
 function safe_getSlot(px::Paxos, s::SlotNum)
     holding(lock(px), "safe_getSlot $(s)") do
@@ -317,8 +332,8 @@ function safe_getSlot(px::Paxos, s::SlotNum)
 end
 
 function persistently(f::Function,  px::Paxos, slot::Slot)
-        f()
-        syncSlot(px, slot)
+    f()
+    syncSlot(px, slot)
 end
 
 
@@ -394,33 +409,31 @@ function proposer(px::Paxos, v::CriticalCommand, slot_num::SlotNum)
     end
     
 end
+
+
 function Handle(px::Paxos, args::CriticalCommand)
-    slot_num =  holding(lock(px), "Handle Command") do
-        getMaxSlot(log(px))+1
+    holding(lock(px), "Handle Command") do
+        s = getMaxSlot(log(px))+1
+        @async proposer(px, args, s)
+        s
     end
-    @async proposer(px, args, slot_num)
-    slot_num
     
 end
-
-function Handle(px::Paxos, args::Ping)
-    PingReply()
-end
-
-
-
 ######################
 ##     Tasklets     ##
 ######################
 
 function RPCServer(px::Paxos)
     server = listen(port(px))
+    @info "RPC Server Starting"
     while true
         conn = accept(server)
+        @debug "Got a Connection"
         @async begin
             try
                 while true
                     args = deserialize(conn)
+                    @debug args
                     try
                         r = Handle(px, args)
                         serialize(conn,r)
@@ -443,44 +456,51 @@ function LogCrawler(px::Paxos)
             if isnull(next)
                 break
             end
+            @show next
             next = next.value
-            timeout = () -> @async proposer(px, NoOp(), next.num) # TODO: Can we guarantee that command has a No_Op more idomatically?
-            waitSignal(next.condition, 0.01, 3.0, timeout) # level trigger wait until the slot is done.
-            changed = holding(next.lock, "Log Crawler Read $(next.num)") do
-                if next.fate != Decided # Should always be Decided!
-                    throw(ErrorException("LogCrawler condtion variable triggered while fate was not decided"))
+            times = Int64(3.0/0.1)
+            count = 0
+            while true
+                if count > times
+                    #Timeout
+                    @async proposer(px, NoOp(), next.num) # TODO: Can we guarantee that command has a No_Op more idomatically?
                 end
-                completed(px)[self(px)] += 1
-                notNull(next.v_a, false) do v
-                    if typeof(v) <: ExternalCriticalCommand
-                        transition(px, v)
-                        true
-                    elseif typeof(next.v_a.value) <: InternalCriticalCommand
-                        false
-                    else
-                        false
+                count += 1
+                SQLite.transaction(db(px)) do
+                    d = SQLite.query(db(px), "select v_a from slots where Fate = ? and K = ? limit 1", [Decided, next.num]).data
+                    if length(d.data[1])> 0 && !isnull(d.data[1][1])
+                        command = d.data[1][1].value
+                        completed(px)[self(px)] += 1
+                        if typeof(command) <: ExternalCriticalCommand
+                            SQLite.transaction(db(px)) do
+                                transition(px, command)
+                                syncCompleted(px)
+                                true
+                            end
+                        elseif typeof(command) <: InternalCriticalCommand
+                            false
+                        else
+                            false
+                        end
                     end
                 end
             end
-            if changed
-                holding(lock(px), "Log Crawler write") do
-                    syncCompleted(px)
-                    syncSnapshot(px)
-                end
-            end
-
+            wait(Timer(0.01))
         end
-        wait(Timer(1))
+
+        
+
     end
+    wait(Timer(1))
 end
 function Forgettor(px::Paxos)
     while true
         completed = take!(forgetChan(px))
         holding(lock(px), "Forgettor") do
             updateCompleted(px, completed) # updates completed and forgotten fields and deletes elements from log
+            syncForgot(px)
         end
 
-        syncForgot(px)
 
     end
 end
@@ -535,23 +555,39 @@ type Context
     port::Int64
     peers::Array{Tuple{Hostname, Port},1}
     transition::Function
-    slot_dir
-    forget_f
-    snapshot_f
-    slot_num_f
+    db::SQLite.DB
+    function Context(port, peers, transition, db_loc::AbstractString)
+        db = SQLite.DB(db_loc)
+        SQLite.transaction(db) do
+            try
+                SQLite.query(db, "create table parameters (K TEXT Unique PRIMARY KEY, V TEXT)")
+            catch SQLite.SQLiteException
+            end
+
+
+            try
+                SQLite.query(db, "create table slots (K INTEGER PRIMARY KEY, n_p INT64, n_a INT64, fate INT, v_a BLOB NULLABLE)")
+            catch SQLite.SQLiteException
+            end
+            try
+                SQLite.query(db, "create table snapshot (K TEXT PRIMARY KEY, V BLOB)")
+            catch SQLite.SQLiteException
+            end
+
+        end
+        new(port, peers, transition, db)
+    end
 end
-type Instance{ Snapshot} <: Paxos
+type Instance <: Paxos
     self::Int64
-    log::Log
     completed::Array{Int64, 1}
-    snapshot::Snapshot
     forgot::Int64
     context::Context
     lock::Lock
     forgetChan::Channel{Array{Int64, 1}}
-    Instance(self, log, completed, snapshot, forgot, context) = new(self,
-                                                                 log, completed, snapshot, forgot, context, Lock(),
-                                                                 Channel{Array{Int64, 1}}(5))
+    Instance(self, completed, forgot, context) = new(self,
+                                                          completed, forgot, context, Lock(),
+                                                          Channel{Array{Int64, 1}}(5))
 end
 
 function port(px::Instance)#::Int64
@@ -565,9 +601,6 @@ function transition(px::Instance, v::ExternalCriticalCommand)#:: Function
 end
 function self(px::Instance)#::Int64
     px.self
-end
-function log(px::Instance)#::Log
-    px.log
 end
 function completed(px::Instance)#::Array{Int64, 1}
     px.completed
@@ -584,76 +617,61 @@ end
 function forgetChan(px::Instance)#::Channel{Array{Int64, 1}}
     px.forgetChan
 end
+function db(px::Instance)
+    context(px).db
+end
 function updateCompleted(px::Instance, completed)
-    px.completed = max(px.completed, completed)
-    forgot = min(px.completed...)
-    for i = px.forgot:forgot
-        delete!(px.log.slots, i)
-    end
-    px.forgot = forgot
+    px.completed = max(px.completed, completed) # Note this is vectorized
+    px.forgot = min(px.completed...)
 end
 function syncSlot(px::Instance, slot::Slot)
-    open("$(px.context.slot_dir)/$(slot.num)", "w+") do io
-        serialize(io, slot)
-    end
+    a = IOBuffer()
+    serialize(a, slot)
+    b = bytestring(a)
+    SQLite.query(db(px), "insert or replace into slots values (?, ?)",[slot.num, b]) 
 end
 
 function syncForgot(px::Instance)
     # Update the forgot index first because we want to prevent the
     # case where we delete a file, then crash, and think our
     # forgot index is too high
-    open(context(px).forget_f, "w") do io
-        serialize(io, forgot(px))
-    end
-    for f=readdir(context(px).slot_dir)
-        if parse(Int64, f) <= forgot(px)
-            rm("$(context(px).slot_dir)/$f")
-        end
+    SQLite.transaction(db(px)) do
+        SQLite.query(db(px), "insert or replace into parameters values ('forgot', ?)",[forgot(px)]) 
+        SQLite.query(db(px), "delete from slots where  (K <= ?)",[forgot(px)]) 
     end
 end
 function syncCompleted(px::Instance,)
-    open(context(px).slot_num_f, "w") do io
-        serialize(io, completed(px)[self(px)])
+    SQLite.transaction(db(px)) do
+        SQLite.query(db(px), "insert or replace into parameters values ('completed', ?)",[completed(px)[self(px)]]) 
     end
 end
 
-function syncSnapshot(px::Instance)
-    open(context(px).snapshot_f, "w") do io
-        @show px.snapshot
-        serialize(io,px.snapshot)
-    end
-end
-function read_file_or_default(f, d)
-    if isfile(f)
-        open(f) do io
-            deserialize(io)
-        end
-    else
-        d
-    end
-end
-function node{Snapshot}(context::Context, self::Int64, snapshot::Snapshot)
+function node(context::Context, self::Int64)
     # print("Starting on $(context.port)\n")
 
     # Ensure Path exists
-    mkpath(context.slot_dir)
     log = Dict{SlotNum, Slot}() 
     m = -1
-    for f=readdir(context.slot_dir)
-        s= read_file_or_default("$(context.slot_dir)/$f", ()) # () should never be returned
-        log[s.num] = s
-        m = max(m,s.num)
+    d = SQLite.query(context.db, "select max(K) from slots").data[1]
+    if length(d) >0
+        notNull(d[1]) do v
+            m = max(m,v)
+        end
     end
-    snapshot = read_file_or_default(context.snapshot_f, snapshot)
 
     slot_nums = fill(-1,length(context.peers))
-    slot_nums[self] = read_file_or_default(context.slot_num_f, -1)
+    v = SQLite.query(context.db, "select * from parameters where (K = 'completed')").data[2]
+    if length(v) > 0 && !isnull(v[1])
+        slot_nums[self] = v[1].value
+    end
+    v = SQLite.query(context.db, "select * from parameters where (K = 'forgot')").data[2]
+    forgot = -1
+    if length(v) > 0 && !isnull(v[1])
+        forgot = v[1].value 
+    end
 
-    forget = read_file_or_default( context.forget_f, -1)
-
-    px = Instance{Snapshot}(self, Log(log, m),  slot_nums, snapshot, forget,  context)
-    @async Forgettor(px)
-    @async Heartbeat(px)
+    px = Instance(self, slot_nums, forgot,  context)
+    println("Starting Node on $(context.port)")
     @async LogCrawler(px)
     RPCServer(px)
 
