@@ -380,7 +380,7 @@ function proposer(px::Paxos, v::CriticalCommand, slot_num::SlotNum)
         n = length(peers(px))*epoch + self(px) + 1
         chan = Base.Channel{PrepareReply}(5)# Magic number, not super important! Could be 1
         prep = WithExtraInfo(PrepareArgs(slot_num, n), safe_getExtraInfo(px))
-        @info "Preparing to propose $v on slot $slot_num on $(self(px))"
+        @info "Proposing on slot $slot_num on $(self(px)) with value $v"
         broadcast(px, prep, chan)
         positives = 0
         negatives = 0
@@ -428,7 +428,7 @@ function Handle(px::Paxos, args::CriticalCommand)
     
 end
 function Handle(px::Paxos, args::ExternalNonCriticalCommand)
-    user_defined_function(px)(px,args)
+    user_defined_function(px,db(px), args)
 end
 ######################
 ##     Tasklets     ##
@@ -496,7 +496,7 @@ function LogCrawler(px::Paxos)
                         command = result[1][1].value.value # must not be null, otherwise consensus broken somewhere else
                         completed(px)[self(px)] += 1
                         syncCompleted(px,d)
-                        @info "LOG CRAWLER COMPLETED COMMAND $command on $(self(px)), completed $(completed(px))"
+                        @info "LogCrawler completed Command $command on $(self(px))"
                         if typeof(command) <: ExternalCriticalCommand
                             @debug "running user_defined_function function"
                             user_defined_function(px,d, command)
@@ -674,6 +674,9 @@ function deletepeer(px::Instance, host, port)#::Array{Tuple{Hostname, Port},1}
     data = SQLite.query(d, "delete from peers where (host = ?, port = ?)", [host, port])
 end
 function user_defined_function(px::Instance, d::SQLite.DB, v::ExternalCriticalCommand)#:: Function
+    px.context.user_defined_function(px, d, v)
+end
+function user_defined_function(px::Instance, d::SQLite.DB, v::ExternalNonCriticalCommand)#:: Function
     px.context.user_defined_function(px, d, v)
 end
 function user_defined_function(px::Instance)
