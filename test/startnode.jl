@@ -1,16 +1,19 @@
 using Rock
-peers = [(Rock.Hostname("localhost"), 8000), (Rock.Hostname("localhost"), 8001), (Rock.Hostname("localhost"), 8002)]
+peers = [(Rock.Hostname("localhost"), Rock.Port(8000)),
+         (Rock.Hostname("localhost"), Rock.Port(8001)),
+         (Rock.Hostname("localhost"), Rock.Port(8002))]
 type C <: Rock.ExternalCriticalCommand
-    a::Int
+    a
 end
-function t(c)
+function t(px, d, c)
 @show c
 end
 
 i = parse(Int64, ARGS[1])
-try
-    x = parse(Int, ARGS[2])
-    Rock.command(Rock.client("localhost", 8000), C(x))
-catch
-    Rock.node(Rock.Context(peers[i][2], peers, t, AbstractString("sqlite$i.db")),i)
+if length(ARGS) >1
+    Rock.command(Rock.client("localhost", peers[i][2]), C(ARGS[2]))
+else
+    c = Rock.Context(peers[i][2], peers, t, AbstractString("sqlite$i.db"))
+    n  =Rock.Instance(c,i)
+    Rock.start(n)
 end
