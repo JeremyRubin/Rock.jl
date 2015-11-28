@@ -1,9 +1,9 @@
 module Rock
+module Server
 using LockUtils
-
 using SQLite
 using Logging
-@Logging.configure(level=INFO)
+@Logging.configure(level=DEBUG)
 ############################
 ##    Base/Abstract types ##
 ############################
@@ -16,7 +16,79 @@ typealias Hostname AbstractString
 typealias Port Int64
 
 # Our abstract notion of Paxos
-abstract Paxos
+####################################
+##   Paxos Paxos Components    ##
+##   Not "integrated" to abstract ## 
+##   FS out                       ##
+####################################
+type Context
+    port::Port
+    peers::Array{Tuple{ASCIIString, Int64}, 1}
+    user_defined_function::Function
+    db_loc::AbstractString
+    function Context(port::Port, peers::Array{Tuple{ASCIIString, Int64},1}, user_defined_function::Function, db_loc::ASCIIString)
+        d = SQLite.DB(db_loc)
+        SQLite.transaction(d) do
+            try
+                SQLite.query(d, "create table parameters (K TEXT Unique PRIMARY KEY, V BLOB)")
+            catch SQLite.SQLiteException
+            end
+            try
+                SQLite.query(d, "create table slots (slot INTEGER PRIMARY KEY AUTOINCREMENT, n_p INT64, n_a INT64, fate INT, v_a BLOB)")
+            catch SQLite.SQLiteException
+            end
+            try
+                SQLite.query(d, "create table peers (host TEXT, port Int, unique (host, port))")
+                for (h, p)= peers
+                    SQLite.query(d, "insert or ignore into peers values (?, ?)", [h, p])
+                end
+            catch SQLite.SQLiteException
+            end
+
+        end
+        new(port, peers, user_defined_function, db_loc)
+        
+    end
+end
+function db(context::Context)
+    SQLite.DB(context.db_loc)
+end
+type t
+    self::Int64
+    completed::Array{Int64, 1}
+    forgot::Int64
+    context::Context
+    lock::Lock
+    dblock::ReentrantLock
+    rpc_task::Task
+    log_task::Task
+    function Paxos(context::Context, self::Int64)
+
+        d  = db(context)
+        # Ensure Path exists
+        # m = -1
+        # data = SQLite.query(d, "select max(slot) from slots").data[1]
+        # if length(data) >0
+        #     notNull(data[1]) do v
+        #         m = max(m,v)
+        #     end
+        # end
+
+        v = SQLite.query(d, "select V from parameters where (K = 'forgot')").data[1]
+        forgot = 0
+        if length(v) > 0 && !isnull(v[1])
+            forgot = v[1].value 
+        end
+        completed = fill(forgot,length(context.peers))
+        v = SQLite.query(d, "select V from parameters where (K = 'completed')").data[1]
+        if length(v) > 0 && !isnull(v[1])
+            completed[self] = v[1].value
+        end
+
+        new(self, completed, forgot, context, Lock(), ReentrantLock())
+    end
+end
+typealias Paxos t
 
 
 # The following API must be supported!!
@@ -216,8 +288,8 @@ function safe_getExtraInfo(px::Paxos)
         ExtraInfo(px)
     end
 end
-type WithExtraInfo
-    command
+immutable WithExtraInfo <: BaseMessage
+    command::BaseMessage
     info::ExtraInfo
 end
 @inline function getExtraInfo(v::WithExtraInfo)
@@ -228,7 +300,7 @@ function Handle(px::Paxos, command::WithExtraInfo)
     try
         @async Forgettor(px, command.info.completed)
     catch err
-        @debug err
+        @error err
     end
     Handle(px, command.command)
 end
@@ -253,7 +325,7 @@ end
     end
 end
 
-function message(px, m, chan, i)
+function message(px::Paxos, m::BaseMessage, chan, i::Int64)
     host, port = peers(px)[i]
     conn = connect(host, port)
     serialize(conn, m)
@@ -270,12 +342,12 @@ function message(px, m, chan, i)
     end
     v
 end
-function broadcast(px::Paxos, m, chan)
+function broadcast(px::Paxos, m::BaseMessage, chan)
     @async for i = 1:length(peers(px))
         message(px, m, Nullable(chan), i)
     end
 end
-function broadcast(px::Paxos, m)
+function broadcast(px::Paxos, m::BaseMessage)
     @async for i = 1:length(peers(px))
         message(px, m, Nullable(),i)
     end
@@ -287,13 +359,12 @@ function unsafe_getSlot!(px::Paxos,d::SQLite.DB, s::SlotNum)
         Slot(0,0,0,Nullable(), Forgotten)
     else
         obj = SQLite.query(d, "select slot, n_p,n_a, v_a, fate from slots where (slot=?) limit 1", [s]).data
-        @debug obj
         if length(obj[1]) > 0 
-            @debug "GOT OBJ"
+            @debug "Got Slot $(Slot(obj[1][1].value, obj[2][1].value,obj[3][1].value, obj[4][1].value, obj[5][1].value))"
+
             Slot(obj[1][1].value, obj[2][1].value,obj[3][1].value, obj[4][1].value, obj[5][1].value)
         else
             v = Slot(s, 0,0,Nullable(), Pending)
-            @debug "CEHCK"
             SQLite.query(d, "insert into slots values (?, ?, ?, ?, ?)", [s, 0, 0,  Pending, Nullable{CriticalCommand}()])
             v
         end
@@ -341,7 +412,7 @@ end
 ##################################
 ##    Proposer functionality    ##
 ##################################
-function acceptPhase(px::Paxos,slot_num::SlotNum, n::Int64, v::CriticalCommand, majority)
+function acceptPhase(px::Paxos,slot_num::SlotNum, n::Int64, v::CriticalCommand, majority::Int64)
     accept = WithExtraInfo(AcceptArgs(slot_num, n, v),  safe_getExtraInfo(px))
     chan = Base.Channel{AcceptReply}(5)
     broadcast(px, accept, chan)
@@ -369,61 +440,85 @@ function acceptPhase(px::Paxos,slot_num::SlotNum, n::Int64, v::CriticalCommand, 
     end
 end
 
-function proposer(px::Paxos, v::CriticalCommand, slot_num::SlotNum)
+function proposer(px::Paxos, v::CriticalCommand, slot_num::SlotNum, ret = false)
     epoch = -1
     majority = div(length(peers(px)) +2, 2)
-    while (holding(lock(px), "Proposer While Loop $slot_num") do
-           @debug "GETTING FATE"
-           getSlot!(px, slot_num).fate == Pending
-           end)
-        epoch += 1
-        n = length(peers(px))*epoch + self(px) + 1
-        chan = Base.Channel{PrepareReply}(5)# Magic number, not super important! Could be 1
-        prep = WithExtraInfo(PrepareArgs(slot_num, n), safe_getExtraInfo(px))
-        @info "Proposing on slot $slot_num on $(self(px)) with value $v"
-        broadcast(px, prep, chan)
-        positives = 0
-        negatives = 0
-        n_a = 0
-        v_a = v
-        loop = true
-        while loop
-            r = take!(chan)
-            if r.Ok
-                positives += 1
-                if r.n_a > n_a
-                    notNull(r.v_a) do v_new
-                        v_a = v_new
+    has_produced = false
+    while true
+        pending = holding(lock(px), "Proposer While Loop $slot_num") do
+            @debug "GETTING FATE"
+            getSlot!(px, slot_num).fate == Pending
+        end
+        if !pending
+            break
+        else
+            epoch += 1
+            n = length(peers(px))*epoch + self(px) + 1
+            chan = Base.Channel{PrepareReply}(length(peers(px)))# We don't want it to block ever
+            prep = WithExtraInfo(PrepareArgs(slot_num, n), safe_getExtraInfo(px))
+            @info "Proposing on slot $slot_num on $(self(px)) with value $v"
+            broadcast(px, prep, chan)
+            positives = 0
+            negatives = 0
+            n_a = 0
+            v_a = v
+            loop = true
+            while loop
+                r = take!(chan)
+                if r.Ok
+                    positives += 1
+                    if r.n_a > n_a
+                        notNull(r.v_a) do v_new
+                            if ret && v_a != v_new && !has_produced
+                                has_produced = true
+                                produce(false)
+                            end
+                            v_a = v_new
+                        end
                     end
+                    if positives >= majority
+                        a = acceptPhase(px, slot_num, n, v_a, majority)
+                        if a
+                            if !has_produced
+                                produce(true)
+                            end
+                            loop = false
+                        end
+                    end
+                else
+
+                    negatives += 1
                 end
-                if positives >= majority
-                    acceptPhase(px, slot_num, n, v_a, majority)
+                if negatives >= majority
                     loop = false
                 end
-            else
+            end
 
-                negatives += 1
-            end
-            if negatives >= majority
-                loop = false
-            end
         end
-
     end
     
 end
 
 
 function Handle(px::Paxos, args::CriticalCommand)
-    d = db(px)
-    holding(lock(px), "Handle Command") do
-        blockingTransaction(px,d)  do
-            SQLite.query(d, "insert into slots values (null, ?, ?, ?, ?)", [0, 0,  Pending,Nullable{CriticalCommand}()])
-            # Only safe because on one connection
-            s = SQLite.query(d, "select last_insert_rowid()").data[1][1].value
-            @async proposer(px, args, s)
-            s
+    try
+        d = db(px)
+        while true
+            t = holding(lock(px), "Handle Command") do
+                blockingTransaction(px,d)  do
+                    SQLite.query(d, "insert into slots values (null, ?, ?, ?, ?)", [0, 0,  Pending,Nullable{CriticalCommand}()])
+                    # Only safe because on one connection
+                    s = SQLite.query(d, "select last_insert_rowid()").data[1][1].value
+                    @async proposer(px, args, s, true)
+                end
+            end
+            if consume(t)
+                return true
+            end
         end
+    catch err
+        @debug err
+        return false
     end
     
 end
@@ -436,31 +531,31 @@ end
 
 function RPCServer(px::Paxos)
     server = listen(port(px))
-    @info "RPC Server Starting"
+    @info "RPC Server Starting on port $(port(px)), node $(self(px))"
     while true
         conn = accept(server)
-        @debug "Got a Connection"
+        @info "Incoming Connection on node $(self(px))"
         @async begin
             while true
                 try
-                    args = deserialize(conn)
-                    @debug "RPCServer Args: $args"
+                    args = deserialize(conn)::BaseMessage 
+                    @info "RPCServer $(self(px)) Args: $args"
                     try
                         r = Handle(px, args)
-                        @debug "RPCServer Response: $r"
+                        @info "RPCServer $(self(px)) Response: $r"
                         serialize(conn,r)
                         flush(conn)
                     catch err
-                        @debug "Could not handle!\n$args\n $err"
+                        @debug "RPCServer $(self(px)) Error Handling:\n    $args\n     $err"
                         close(conn)
                         break
                     end
                 catch err
-                    @debug "Connection Failed With $err on node $(self(px))"
+                    @debug "RPCServer $(self(px)) Connection Failed With $err"
                     close(conn)
                     break
-                # finally
-                #     close(conn)
+                    # finally
+                    #     close(conn)
                 end
             end
         end
@@ -516,11 +611,8 @@ function LogCrawler(px::Paxos)
                 end
             end
         end
-
-        
-
+        wait(Timer(1))
     end
-    wait(Timer(1))
 end
 function Forgettor(px::Paxos, completed::Array{Int64,1})
     @debug "Forgetting up to $completed"
@@ -580,138 +672,70 @@ function Heartbeat(px::Paxos)
     end
 end
 
-####################################
-##   Paxos Instance Components    ##
-##   Not "integrated" to abstract ## 
-##   FS out                       ##
-####################################
-type Context
-    port::Port
-    peers::Array{Tuple{ASCIIString, Int64}, 1}
-    user_defined_function::Function
-    db_loc::AbstractString
-    function Context(port::Port, peers::Array{Tuple{ASCIIString, Int64},1}, user_defined_function::Function, db_loc::ASCIIString)
-        d = SQLite.DB(db_loc)
-        SQLite.transaction(d) do
-            try
-                SQLite.query(d, "create table parameters (K TEXT Unique PRIMARY KEY, V BLOB)")
-            catch SQLite.SQLiteException
-            end
-            try
-                SQLite.query(d, "create table slots (slot INTEGER PRIMARY KEY AUTOINCREMENT, n_p INT64, n_a INT64, fate INT, v_a BLOB)")
-            catch SQLite.SQLiteException
-            end
-            try
-                SQLite.query(d, "create table peers (host TEXT, port Int, unique (host, port))")
-                for (h, p)= peers
-                    SQLite.query(d, "insert or ignore into peers values (?, ?)", [h, p])
-                end
-            catch SQLite.SQLiteException
-            end
-
-        end
-         new(port, peers, user_defined_function, db_loc)
-        
-    end
-end
-function db(context::Context)
-    SQLite.DB(context.db_loc)
-end
-type Instance <: Paxos
-    self::Int64
-    completed::Array{Int64, 1}
-    forgot::Int64
-    context::Context
-    lock::Lock
-    dblock::ReentrantLock
-    function Instance(context::Context, self::Int64)
-
-        d  = db(context)
-        # Ensure Path exists
-        # m = -1
-        # data = SQLite.query(d, "select max(slot) from slots").data[1]
-        # if length(data) >0
-        #     notNull(data[1]) do v
-        #         m = max(m,v)
-        #     end
-        # end
-
-        v = SQLite.query(d, "select V from parameters where (K = 'forgot')").data[1]
-        forgot = 0
-        if length(v) > 0 && !isnull(v[1])
-            forgot = v[1].value 
-        end
-        completed = fill(forgot,length(context.peers))
-        v = SQLite.query(d, "select V from parameters where (K = 'completed')").data[1]
-        if length(v) > 0 && !isnull(v[1])
-            completed[self] = v[1].value
-        end
-        new(self, completed, forgot, context, Lock(), ReentrantLock())
-    end
-end
-function start(px::Instance)
-        @info "Starting Node on $(port(px))" 
-        @async LogCrawler(px)
-        # @async Heartbeat(px)
-        RPCServer(px)
+function start(px::Paxos)
+    @info "Starting Node on $(port(px))" 
+    px.log_task = @async LogCrawler(px)
+    px.rpc_task = @async RPCServer(px)
+    wait(px.rpc_task)
+    # @async Heartbeat(px)
 end
 
-function port(px::Instance)#::Int64
+function port(px::Paxos)#::Int64
     px.context.port
 end
-function peers(px::Instance)#::Array{Tuple{Hostname, Port},1}
+function peers(px::Paxos)#::Array{Tuple{Hostname, Port},1}
     px.context.peers
     # d = db(px)
     # data = SQLite.query(d, "select host, port from peers").data
     # collect(zip(map(v -> v.value, data[1]), map(v -> v.value, data[2])))
 end
-function addpeer(px::Instance, host, port)#::Array{Tuple{Hostname, Port},1}
+function addpeer(px::Paxos, host, port)#::Array{Tuple{Hostname, Port},1}
     d = db(px)
     data = SQLite.query(d,  "insert or ignore into peers values (?, ?)", [host, port])
 end
-function deletepeer(px::Instance, host, port)#::Array{Tuple{Hostname, Port},1}
+function deletepeer(px::Paxos, host, port)#::Array{Tuple{Hostname, Port},1}
     d = db(px)
     data = SQLite.query(d, "delete from peers where (host = ?, port = ?)", [host, port])
 end
-function user_defined_function(px::Instance, d::SQLite.DB, v::ExternalCriticalCommand)#:: Function
+function user_defined_function(px::Paxos, d::SQLite.DB, v::ExternalCriticalCommand)#:: Function
     px.context.user_defined_function(px, d, v)
 end
-function user_defined_function(px::Instance, d::SQLite.DB, v::ExternalNonCriticalCommand)#:: Function
+function user_defined_function(px::Paxos, d::SQLite.DB, v::ExternalNonCriticalCommand)#:: Function
     px.context.user_defined_function(px, d, v)
 end
-function user_defined_function(px::Instance)
+function user_defined_function(px::Paxos)
     px.context.user_defined_function
 end
-function self(px::Instance)#::Int64
+function self(px::Paxos)#::Int64
     px.self
 end
-function completed(px::Instance)#::Array{Int64, 1}
+function completed(px::Paxos)#::Array{Int64, 1}
     px.completed
 end
-function forgot(px::Instance)##::Int64
+function forgot(px::Paxos)##::Int64
     px.forgot
 end
-function context(px::Instance)#::Context
+function context(px::Paxos)#::Context
     px.context
 end
-function lock(px::Instance)#::Lock
+function lock(px::Paxos)#::Lock
     px.lock
 end
-function db(px::Instance)
+function db(px::Paxos)
     db(context(px))
 end
 function syncSlot(d::SQLite.DB, slot::Slot)
     SQLite.query(d, "insert or replace into slots values (?, ?, ?, ?, ?)",[slot.num, slot.n_p, slot.n_a, slot.fate, slot.v_a  ]) 
 end
 
-function updateCompleted(px::Instance, completed)
+function updateCompleted(px::Paxos, completed)
     px.completed = max(px.completed, completed) # Note this is vectorized
     px.forgot = min(px.completed...)
 end
-function syncCompleted(px::Instance, d::SQLite.DB)
+function syncCompleted(px::Paxos, d::SQLite.DB)
     SQLite.query(d, "insert or replace into parameters values ('completed', ?)",[completed(px)[self(px)]]) 
 end
-function syncForgot(px::Instance, d::SQLite.DB)
+function syncForgot(px::Paxos, d::SQLite.DB)
     # Update the forgot index first because we want to prevent the
     # case where we delete a file, then crash, and think our
     # forgot index is too high
@@ -721,21 +745,30 @@ function syncForgot(px::Instance, d::SQLite.DB)
         syncCompleted(px, d)
     end
 end
-
-type Client
-    conn
+end
+module Client
+import Rock
+using Logging
+@Logging.configure(level=DEBUG)
+type t
+    host::ASCIIString
+    port::Int64
 end
 
-function client(host::AbstractString, port::Int64)
-    Client(connect(host, port))
+function make(host::ASCIIString, port::Int64)
+    t(host, port)
 end
-function command(c::Client, cmd::Command)
-
-    serialize(c.conn, cmd)
-    flush(c.conn)
-    deserialize(c.conn)
-    
+function _connect(c::t)
+    connect(c.host, c.port)
+end
+function command(c::t, cmd::Rock.Server.Command)
+    @debug "Issuing Rock Command ($cmd) to $c"
+    conn = _connect(c)
+    serialize(conn, cmd)
+    flush(conn)
+    deserialize(conn)
 end
 
 
+end
 end
