@@ -7,7 +7,7 @@ import Rock.RPC: BaseMessage, Command , Response , NonCriticalCommand, ExternalN
 using LockUtils
 using SQLite
 using Logging
-@Logging.configure(level=DEBUG)
+@Logging.configure(level=INFO)
 ############################
 ##    Base/Abstract types ##
 ############################

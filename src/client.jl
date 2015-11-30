@@ -16,9 +16,15 @@ end
 function command(c::t, cmd::Rock.RPC.Command)
     @debug "Issuing Rock Command ($cmd) to $c"
     conn = _connect(c)
-    serialize(conn, cmd)
-    flush(conn)
-    deserialize(conn)
+    try
+        serialize(conn, cmd)
+        flush(conn)
+        deserialize(conn)
+    catch err
+        rethrow(err)
+    finally
+        close(conn)
+    end
 end
 
 
